@@ -1,0 +1,1 @@
+﻿<%@ ServiceHost Service="ServiceProxy.SampleServices.ISampleService" Factory="ServiceProxy.DemoApplication.CustomServiceHostFactory"%>

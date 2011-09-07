@@ -1,0 +1,370 @@
+﻿<head>
+<link type="text/css" rel="stylesheet" href="http://s.codeproject.com/App_Themes/Std/CSS/CodeProject.min.css?dt=2.3.110830.1">
+</head>
+<pre>
+Title:       Dependency injection and Windows Communication Foundation 
+Author:      seesharper
+Email:       bernhard.richter@gmail.com
+Member ID:   2506643
+Language:    C#
+Platform:    Windows
+Technology:  WPF
+Level:       Intermediate
+Description: This article shows an alternative approach to enable dependency injection when working with WCF services.
+Section      Platforms, Frameworks &amp; Libraries
+SubSection   Windows Presentation Foundation
+License:     CPOL </pre>
+
+
+<h2>Introduction</h2> 
+
+<p>I have read a lot of articles about how to integrate your favorite Ioc container 
+    with Windows Communication Foundation. All these articles have one thing in 
+    common. They all make use of the IInstanceProvider interface and create a custom 
+    implementation of this interface to hook the servicecontainer into the WCF 
+    stack.&nbsp; This article is going to demonstrate a different approach to the 
+    problem and hopefully we end up with a clean and reusable solution.</p>
+
+<h2>Background</h2>
+
+<p>
+    So what is the problem here? Why do we want to use an Ioc container on the 
+    server side to manage service instances?
+</p>
+<p>
+    To illustrate this we will look into a simple example where we have this service 
+    contract.</p>
+<pre>
+[ServiceContract]
+public interface ISampleService
+{
+    [OperationContract]
+    int Calculate(int value1, int value2);
+}
+</pre>
+<p>
+    Pretty simple and we have the following implementation to go along with it.</p>
+<pre>
+public class SampleService : ISampleService
+{
+    public int Calculate(int value1, int value2)
+    {
+        return value1 + value2;
+    }
+}
+</pre>
+
+
+
+<p>
+    The SampleService class has no dependencies passed in (yet) so the only thing we 
+    need to do is create an instance of the SampleService class whenever WCF thinks 
+    appropriate. And we don&#39;t really need to to anything to make that happen and most 
+    of the required information is presents in the *.svc file that corresponds to 
+    our service.</p>
+<pre>
+&lt;%@ ServiceHost Language="C#" Debug="true" Service="WcfService1.SampleService" CodeBehind="SampleService.svc.cs" %&gt;
+</pre>
+
+
+
+
+<p>
+    What we see here is information that is used to create the service instance and 
+    the bits that I really don&#39;t like is that we need to reference our concrete 
+    implementation (SampleService) in the .svc file. I would rather much just 
+    specify the contract. And we actually can do this by routing the service request 
+    to a ServiceHostFactory that we need to implement. Then we can change it to:</p>
+<pre>
+&lt;%@ ServiceHost Language="C#" Debug="true" Service="WcfService1.ISampleService" Factory="WcfService1.CustomServiceHostFactory"  %&gt;
+</pre>
+
+
+
+
+
+<p>
+    Look better already, but what about the CustomServiceHostFactory? Well, that is 
+    prettu easy. We just need to make it create a ServiceHost and pass the service 
+    type to its constructor.</p>
+<pre>
+public class CustomServiceHostFactory : ServiceHostFactory
+{        
+    protected override System.ServiceModel.ServiceHost CreateServiceHost(Type serviceType, Uri[] baseAddresses)
+    {           
+        return base.CreateServiceHost(serviceType, baseAddresses);
+    }        
+}
+</pre>
+
+
+
+
+
+
+<p>
+    There we have it. It should now run just fine again. Well, actually it does not. 
+    The ServiceHost class can only accept a concrete type as the service type (or a 
+    singleton object, but that is not what we are after here)</p>
+<p>
+    I guess putting the contract in the .svc file was not such a great idea after 
+    all. Let&#39;s change it back to the concrete class and keep the 
+    CustomServiceHostFactory for now.
+</p>
+<p>
+    And now it works just like expected again and provided that this was the 
+    scenario an IInstanceProvider approach would have worked just fine. I&#39;m not 
+    going to explain how to implement it as there are at least a dusin articles that 
+    takes us through that process.</p>
+<p>
+    But what if we wanted to pass dependencies to SampleService?&nbsp; Like this:</p>
+<pre>
+public class SampleService : ISampleService
+{
+    private readonly ILogger _logger;
+
+    public SampleService(ILogger logger)
+    {
+        _logger = logger;
+    }
+
+    public int Calculate(int value1, int value2)
+    {            
+        return value1 + value2;
+    }
+}
+</pre>
+<p>
+    If we try this we can watch it fail with the following error message</p>
+<p>
+    <i>The service type provided could not be loaded as a service because it does 
+    not have a default (parameter-less) constructor. To fix the problem, add a 
+    default constructor to the type, or pass an instance of the type to the host.</i></p>
+<p>
+    Okay, that did not work so now what do we do? We can&#39;t pass an interface and we 
+    can&#39;t pass a concrete type without a parameterless constructor. And an 
+    IInstanceProvider won&#39;t be any good either since we still have to give the 
+    ServiceHost what it wants.</p>
+<p>
+    There is a way around this and that is to add that parameterless constructor and 
+    resort to an IInstanceProvider that does property injection or constructor 
+    injection through the constructor accepting the dependency. </p>
+<p>
+    &nbsp;Wouldn&#39;t it be better to have just that one constructor and somehow make it 
+    work? Is it even possible?</p>
+<h3>
+    A little dynamic typing</h3>
+<p>
+    The idea here is to create a type at runtime that implements our service 
+    contract (ISampleService) and create that type so that it only contains a 
+    parameterless constructor. What we are talking about here is sort of a proxy 
+    implementation, but without the normal method interception stuff we usually see 
+    in dynamic proxies. There is actually just one thing we need to intercept here 
+    and that is when WCF needs to create an instance of our service. I started out 
+    with the following &quot;manual&quot; proxy implementation.</p>
+<pre>
+public class ManualProxy : ISampleService
+{
+    private readonly ISampleService _target;
+
+    public static Func&lt;object&gt; TargetFactory;
+
+    public ManualProxy()
+    {
+        _target = (ISampleService)TargetFactory();
+    }
+
+    public int Calculate(int value1, int value2)
+    {
+        return _target.Calculate(value1,value2);
+    }        
+}
+</pre>
+<p>
+    This is sort of a lazy proxy that creates its target when the proxy type itself 
+    is created. If we go back to the CustomServiceHostFactory class we can actually 
+    test this by using this manually implemented proxy.</p>
+<p>
+    Oh, and before we forget. Let&#39;s change the .svc file to only reference the 
+    service contract again. Like this.</p>
+<pre>
+&lt;%@ ServiceHost Language="C#" Debug="true" Service="WcfService1.ISampleService" Factory="WcfService1.CustomServiceHostFactory"  %&gt;
+</pre>
+<p>
+    And the CustomServiceHostFactory goes something like:</p>
+<pre>
+public class CustomServiceHostFactory : ServiceHostFactory
+{        
+    protected override System.ServiceModel.ServiceHost CreateServiceHost(Type serviceType, Uri[] baseAddresses)
+    {
+        ManualProxy.TargetFactory = () =&gt; new SampleService(new Logger());
+        return base.CreateServiceHost(typeof(ManualProxy), baseAddresses);
+    }        
+}
+</pre>
+
+
+
+
+
+
+
+
+
+
+<p>
+    The static target factory delegate will be invoked once the ManualProxy is 
+    created and the ServiceHost is happy since we have provided a concrete class 
+    with just a parameterless constructor. We fire up the system and we have just 
+    managed to inject a dependency into our service. Sweet!! I guess we can all 
+    imagine the target factory to be calling into our service container instead of 
+    the new operator shown above.</p>
+<h3>
+    From manual to automatic</h3>
+<p>
+    While we have sort of solved the problem, it would be very tiresome to actually 
+    write those proxies by hand and that actually brings us to the core of this 
+    article. How can we create those proxy types at runtime?</p>
+<p>
+    Actually this is quite simple as we can use Reflection.Emit and the TypeBuilder 
+    to create a type that implements our service interface an looks pretty much like 
+    the manual proxy we just saw .</p>
+<p>
+    Emitting IL code at runtime takes getting used to, but essentially we can just 
+    look at ManualProxy in ILSpy and emit exactly the same code.</p>
+<p>
+    It should be noted that a basic understanding of&nbsp; IL and stack management 
+    is good to have.
+</p>
+<p>
+    What I have done is that I have created a factory class (ServiceProxyFactory) 
+    that creates a new type , implements it and finally assigns the target factory 
+    delegate to the type.</p>
+<pre>
+private static Type CreateProxyType(Type serviceType, Func&lt;object&gt; targetFactory)
+{
+    TypeBuilder typeBuilder = GetTypeBuilder(serviceType);
+    FieldBuilder targetFactoryField = DefineTargetFactoryField(typeBuilder);
+    FieldBuilder targetField = DefineTargetField(serviceType, typeBuilder);
+    ImplementParameterlessConstructor(serviceType, typeBuilder, targetFactoryField, targetField);
+    ImplementMethods(serviceType, typeBuilder,targetField);
+    Type proxyType =  typeBuilder.CreateType();
+    AssignTargetFactory(proxyType, targetFactory);
+    return proxyType;
+}
+</pre>
+<p>
+    The proxy types is cached using a dictionary so that we don&#39;t create proxy types 
+    for each request.</p>
+<pre>
+public Type GetProxyType(Type serviceContractType, Func&lt;object&gt; targetFactory)
+{
+    return _proxyCache.GetOrAdd(serviceContractType, s =&gt; CreateProxyType(serviceContractType,targetFactory));
+}
+</pre>
+
+
+
+
+
+
+
+
+
+
+
+
+<p>
+    Most of the stuff in the ServiceProxyFactory is just pretty basic and I leave it 
+    up to reader to take a closer look at it.</p>
+<p>
+    Just to show a little of the &quot;IL magic&quot;, here is the code that implements each 
+    method by forwarding the method call to the underlying target.</p>
+<pre>
+private static void ImplementMethods(Type serviceContractType, TypeBuilder typeBuilder, FieldBuilder targetField)
+{
+    foreach (MethodInfo targetMethod in GetTargetMethods(serviceContractType))
+    {
+        MethodBuilder methodBuilder = GetMethodBuilder(typeBuilder, targetMethod);
+        ILGenerator ilGenerator = methodBuilder.GetILGenerator();
+        ilGenerator.Emit(OpCodes.Ldarg_0);
+        ilGenerator.Emit(OpCodes.Ldfld,targetField);
+        for (int i = 1; i &lt;= targetMethod.GetParameters().Length; ++i)
+            ilGenerator.Emit(OpCodes.Ldarg, i);
+        ilGenerator.Emit(OpCodes.Callvirt,targetMethod);
+        ilGenerator.Emit(OpCodes.Ret); 
+    }
+}
+</pre>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<p>
+    What is really interesting now is to see what we can do with this code. The 
+    whole thing weighs in at approx 100 lines of code.</p>
+<p>
+    We can now change the CustomServiceHostFactory to this:</p>
+<pre>
+public class CustomServiceHostFactory : ServiceHostFactory
+{
+    private static readonly ServiceProxyFactory ServiceProxyFactory = new ServiceProxyFactory();
+    protected override System.ServiceModel.ServiceHost CreateServiceHost(Type serviceType, Uri[] baseAddresses)
+    {            
+        Type serviceProxyType = ServiceProxyFactory.GetProxyType(serviceType, () =&gt; new SampleService(new Logger()));            
+        return base.CreateServiceHost(serviceProxyType, baseAddresses);
+    }        
+}
+</pre>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<p>
+    Again we have to imagine a call to the service container instead of the new 
+    operator.
+</p>
+<p>
+    As we can see we now have full support for dependency injection in WCF and we 
+    don&#39;t have to worry about the restrictions we were faced with before.</p>
+<p>
+    Enjoy!!</p>
+<p>
+    &nbsp;</p>
+<p>
+    &nbsp;</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

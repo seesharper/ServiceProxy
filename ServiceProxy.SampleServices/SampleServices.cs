@@ -11,12 +11,16 @@ namespace ServiceProxy.SampleServices
 
     public class SampleService : ISampleService
     {
+        private readonly ILogger _logger;
+
         public SampleService(ILogger logger)
         {
+            _logger = logger;
         }
 
         public int Calculate(int value1, int value2)
         {
+            _logger.Log("SomeMessage");
             return value1 + value2;
         }
     }

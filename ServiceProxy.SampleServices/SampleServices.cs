@@ -20,7 +20,7 @@ namespace ServiceProxy.SampleServices
 
         public int Calculate(int value1, int value2)
         {
-            _logger.Log("SomeMessage");
+            _logger.Log("SomeLogMessage");
             return value1 + value2;
         }
     }
